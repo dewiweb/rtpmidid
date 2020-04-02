@@ -21,8 +21,14 @@
 #include <string>
 #include "./rtppeer.hpp"
 #include "./poller.hpp"
+#include "./signal.hpp"
 
 namespace rtpmidid {
+  struct address_port_t {
+    std::string address;
+    std::string port;
+  };
+
   /**
    * @short A RTP Client
    *
@@ -32,39 +38,27 @@ namespace rtpmidid {
   class rtpclient{
   public:
     rtppeer peer;
+    // signal_t<> connect_failed_event;
+    poller_t::timer_t connect_timer;
+    int connect_count = 3;  // how many times we tried to connect, after 3, final fail.
+
     int control_socket;
     int midi_socket;
+    struct sockaddr control_addr;
+    struct sockaddr midi_addr;
+
     uint16_t local_base_port;
     uint16_t remote_base_port;
-    struct sockaddr_in peer_addr; // Will reuse addr, just changing the port
     poller_t::timer_t timer_ck;
 
-    rtpclient(std::string name, const std::string &address, int16_t port);
+    rtpclient(std::string name);
     ~rtpclient();
     void reset();
     void sendto(const parse_buffer_t &pb, rtppeer::port_e port);
 
-    void connect_to(std::string address, uint16_t port);
+    void connect_to(const std::string &address, const std::string &port);
     void start_ck_1min_sync();
 
     void data_ready(rtppeer::port_e port);
-
-
-    void on_midi(std::function<void(parse_buffer_t &)> f){
-      peer.on_midi(f);
-    }
-    void on_connect(std::function<void(const std::string &)> f){
-      peer.on_connect(f);
-    }
-    void on_send(std::function<void(const parse_buffer_t &, rtppeer::port_e)> f){
-      peer.on_send(f);
-    }
-    void on_disconnect(std::function<void()> f){
-      peer.on_disconnect(f);
-    }
-
-    void send_midi(parse_buffer_t &buffer){
-      peer.send_midi(buffer);
-    }
   };
 }

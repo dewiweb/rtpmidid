@@ -20,6 +20,7 @@
 #include "./exceptions.hpp"
 #include "./poller.hpp"
 #include "./rtpclient.hpp"
+#include <alsa/seq.h>
 #include <fmt/format.h>
 #include <stdio.h>
 
@@ -85,16 +86,6 @@ namespace rtpmidid{
     snd_config_update_free_global();
   }
 
-  void aseq::on_subscribe(int port, std::function<void(port_t from, const std::string &name)> f){
-    subscribe_callbacks[port].push_back(f);
-  }
-  void aseq::on_unsubscribe(int port, std::function<void(port_t from)> f){
-    unsubscribe_callbacks[port].push_back(f);
-  }
-  void aseq::on_midi_event(int port, std::function<void(snd_seq_event_t *)> f){
-    midi_event_callbacks[port].push_back(f);
-  }
-
   /**
    * @short data is ready at the sequencer to read
    *
@@ -126,17 +117,13 @@ namespace rtpmidid{
           auto myport = ev->dest.port;
           INFO("New ALSA connection from port {} ({}:{})", name, client, port);
 
-          for (auto &f: subscribe_callbacks[myport]){
-            f(port_t(client, port), name);
-          }
+          subscribe_event[myport](port_t(client, port), name);
         }
         break;
         case SND_SEQ_EVENT_PORT_UNSUBSCRIBED:{
           auto addr = &ev->data.addr;
           auto myport = ev->dest.port;
-          for (auto &f: unsubscribe_callbacks[myport]){
-            f(port_t(addr->client, addr->port));
-          }
+          unsubscribe_event[myport](port_t(addr->client, addr->port));
           DEBUG("Disconnected");
         }
         break;
@@ -152,15 +139,15 @@ namespace rtpmidid{
         case SND_SEQ_EVENT_SENSING:
         {
           auto myport = ev->dest.port;
-          for (auto &f: midi_event_callbacks[myport]){
-            f(ev);
-          }
+          auto me = midi_event.find(myport);
+          if (me != midi_event.end())
+            me->second(ev);
         }
         break;
         default:
         static bool warning_raised[SND_SEQ_EVENT_NONE+1];
         if(!warning_raised[ev->type]) {
-          warning_raised[ev->type]=true; 
+          warning_raised[ev->type]=true;
           WARNING("This event type {} is not managed yet", ev->type);
         }
         break;
@@ -237,4 +224,50 @@ namespace rtpmidid{
     return fmt::format("{}-{}", client_name, port_name);
   }
 
+  static void disconnect_port_at_subs(snd_seq_t *seq, snd_seq_query_subscribe_t *subs, uint8_t port) {
+  	snd_seq_port_subscribe_t *port_sub;
+    snd_seq_port_subscribe_alloca(&port_sub);
+
+    for (auto type: {SND_SEQ_QUERY_SUBS_READ, SND_SEQ_QUERY_SUBS_WRITE}){
+      snd_seq_query_subscribe_set_type(subs, type);
+      snd_seq_query_subscribe_set_index(subs, 0);
+      while (snd_seq_query_port_subscribers(seq, subs) >= 0) {
+        const snd_seq_addr_t *addr;
+        const snd_seq_addr_t *root;
+        if (snd_seq_query_subscribe_get_type(subs) == SND_SEQ_QUERY_SUBS_READ){
+          addr = snd_seq_query_subscribe_get_addr(subs);
+          root = snd_seq_query_subscribe_get_root(subs);
+        } else {
+          root = snd_seq_query_subscribe_get_addr(subs);
+          addr = snd_seq_query_subscribe_get_root(subs);
+        }
+
+        DEBUG("Disconnect {}:{} -> {}:{}", root->client, root->port, addr->client, addr->port);
+
+        snd_seq_port_subscribe_set_sender(port_sub, root);
+        snd_seq_port_subscribe_set_dest(port_sub, addr);
+        if (snd_seq_unsubscribe_port(seq, port_sub) < 0) {
+          ERROR("Could not disconenct ALSA seq ports: {}:{} -> {}:{}", root->client, root->port, addr->client, addr->port);
+        }
+
+        snd_seq_query_subscribe_set_index(subs, snd_seq_query_subscribe_get_index(subs) + 1);
+      }
+    }
+  }
+
+  void aseq::disconnect_port(uint8_t port){
+    DEBUG("Disconnect alsa port {}", port);
+    snd_seq_query_subscribe_t *subs;
+    snd_seq_port_info_t *portinfo;
+
+    snd_seq_port_info_alloca(&portinfo);
+    if (snd_seq_get_port_info(seq, port, portinfo) < 0){
+      throw rtpmidid::exception("Error getting port info");
+    }
+
+    snd_seq_query_subscribe_alloca(&subs);
+    snd_seq_query_subscribe_set_root(subs, snd_seq_port_info_get_addr(portinfo));
+
+    disconnect_port_at_subs(seq, subs, port);
+  }
 }

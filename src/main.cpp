@@ -25,12 +25,23 @@
 #include "./rtpmidid.hpp"
 #include "./poller.hpp"
 #include "./config.hpp"
+#include "./control_socket.hpp"
+
+static bool exiting = false;
 
 void sigterm_f(int){
+  if (exiting){
+    exit(1);
+  }
+  exiting = true;
   INFO("SIGTERM received. Closing.");
   rtpmidid::poller.close();
 }
 void sigint_f(int){
+  if (exiting){
+    exit(1);
+  }
+  exiting = true;
   INFO("SIGINT received. Closing.");
   rtpmidid::poller.close();
 }
@@ -50,6 +61,7 @@ int main(int argc, char **argv){
 
     try{
       auto rtpmidid = rtpmidid::rtpmidid_t(&options);
+      auto control = rtpmidid::control_socket_t(rtpmidid, options.control);
 
       while(rtpmidid::poller.is_open()){
         rtpmidid::poller.wait();

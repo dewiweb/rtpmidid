@@ -16,6 +16,9 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
 
 #include "./rtpserver.hpp"
 #include "./poller.hpp"
@@ -25,48 +28,78 @@
 
 using namespace rtpmidid;
 
-rtpserver::rtpserver(std::string _name, int16_t port) : name(std::move(_name)){
+rtpserver::rtpserver(std::string _name, const std::string &port) : name(std::move(_name)){
   control_socket = midi_socket = 0;
-  control_port = port;
-  midi_port = port + 1;
+  control_port = 0;
+  midi_port = 0;
+  struct addrinfo *sockaddress_list = nullptr;
 
   try{
-    struct sockaddr_in servaddr;
-    control_socket = socket(AF_INET, SOCK_DGRAM, 0);
-    if (control_socket < 0){
-      throw rtpmidid::exception("Can not open control socket. Out of sockets?");
+    struct addrinfo hints;
+
+    int res;
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    const char *cport = (port == "") ? nullptr : port.c_str();
+
+    res = getaddrinfo("::", cport, &hints, &sockaddress_list);
+    if (res < 0) {
+      DEBUG("Error resolving address {}:{}", "::", port);
+      throw rtpmidid::exception("Can not resolve address {}:{}. {}", "::", port, strerror(errno));
     }
-    memset(&servaddr, 0, sizeof(servaddr));
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = INADDR_ANY;
-    servaddr.sin_port = htons(control_port);
-    if (bind(control_socket, (const struct sockaddr *)&servaddr, sizeof(servaddr)) < 0){
-      throw rtpmidid::exception("Can not open control socket. Maybe address is in use?");
+    // Get addr info may return several options, try them in order.
+    // we asusme that if the ocntrol success to be created the midi will too.
+    char host[NI_MAXHOST], service[NI_MAXSERV];
+    socklen_t peer_addr_len = NI_MAXHOST;
+    auto listenaddr = sockaddress_list;
+    for(; listenaddr != nullptr; listenaddr = listenaddr->ai_next) {
+      getnameinfo(
+        listenaddr->ai_addr,
+        peer_addr_len, host, NI_MAXHOST,
+        service, NI_MAXSERV, NI_NUMERICSERV
+      );
+      DEBUG("Try listen at {}:{}", host, service);
+
+      control_socket = socket(listenaddr->ai_family, listenaddr->ai_socktype, listenaddr->ai_protocol);
+      if (control_socket < 0){
+        continue; // Bad socket. Try next.
+      }
+      if (bind(control_socket, listenaddr->ai_addr, listenaddr->ai_addrlen) == 0){
+        break;
+      }
+      close(control_socket);
     }
-    if (control_port == 0){
-      socklen_t len = sizeof(servaddr);
-      ::getsockname(control_socket, (struct sockaddr*)&servaddr, &len);
-      control_port = htons(servaddr.sin_port);
-      DEBUG("Got automatic port {} for control", control_port);
-      midi_port = control_port + 1;
+    if (!listenaddr){
+      throw rtpmidid::exception("Can not open rtpmidi control socket. {}.", strerror(errno));
     }
+    struct sockaddr_in6 addr;
+    unsigned int len = sizeof(addr);
+    res = ::getsockname(control_socket, (sockaddr*)&addr, &len);
+    if (res < 0){
+      throw rtpmidid::exception("Error getting info the newly created midi socket. Can not create server.");
+    }
+    control_port = ntohs(addr.sin6_port);
+
+    DEBUG("Control port at {}:{}", host, control_port);
+    midi_port = control_port + 1;
 
     poller.add_fd_in(control_socket, [this](int){ this->data_ready(rtppeer::CONTROL_PORT); });
 
-    midi_socket = socket(AF_INET, SOCK_DGRAM, 0);
+    midi_socket = socket(AF_INET6, SOCK_DGRAM, 0);
     if (midi_socket < 0){
       throw rtpmidid::exception("Can not open MIDI socket. Out of sockets?");
     }
-    memset(&servaddr, 0, sizeof(servaddr));
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = INADDR_ANY;
-    servaddr.sin_port = htons(midi_port);
-    if (bind(midi_socket, (const struct sockaddr *)&servaddr, sizeof(servaddr)) < 0){
-      throw rtpmidid::exception("Can not open MIDI socket. Maybe address is in use?");
+    // Reuse listenaddr, just on next port
+    ((sockaddr_in*)listenaddr->ai_addr)->sin_port = htons( midi_port );
+    if (bind(midi_socket, listenaddr->ai_addr, listenaddr->ai_addrlen) < 0){
+      throw rtpmidid::exception("Can not open MIDI socket. {}.", strerror(errno));
     }
     poller.add_fd_in(midi_socket, [this](int){ this->data_ready(rtppeer::MIDI_PORT); });
-  } catch (...){
-    ERROR("Error creating server at port {}", control_port);
+  } catch (const std::exception &e){
+    ERROR("Error creating server at port {}: {}", control_port, e.what());
     if (control_socket){
       poller.remove_fd(control_socket);
       ::close(control_socket);
@@ -77,7 +110,13 @@ rtpserver::rtpserver(std::string _name, int16_t port) : name(std::move(_name)){
       ::close(midi_socket);
       midi_socket = 0;
     }
+    if (sockaddress_list){
+      freeaddrinfo(sockaddress_list);
+    }
     throw;
+  }
+  if (sockaddress_list){
+    freeaddrinfo(sockaddress_list);
   }
 
   INFO("Listening RTP MIDI connections at 0.0.0.0:{}, with name: '{}'",
@@ -148,7 +187,7 @@ std::shared_ptr<rtppeer> rtpserver::get_peer_by_ssrc(uint32_t ssrc){
 
 void rtpserver::data_ready(rtppeer::port_e port){
   uint8_t raw[1500];
-  struct sockaddr_in cliaddr;
+  struct sockaddr_in6 cliaddr;
   unsigned int len = sizeof(cliaddr);
   auto socket = (port == rtppeer::CONTROL_PORT) ? control_socket : midi_socket;
   auto n = recvfrom(socket, raw, 1500, MSG_DONTWAIT, (struct sockaddr *) &cliaddr, &len);
@@ -175,19 +214,19 @@ void rtpserver::data_ready(rtppeer::port_e port){
   }
 }
 
-void rtpserver::sendto(const parse_buffer_t &pb, rtppeer::port_e port, struct sockaddr_in *address, int remote_base_port){
+void rtpserver::sendto(const parse_buffer_t &pb, rtppeer::port_e port, struct sockaddr_in6 *address, int remote_base_port){
   if (port == rtppeer::MIDI_PORT)
-    address->sin_port = htons(remote_base_port + 1);
+    address->sin6_port = htons(remote_base_port + 1);
   else
-    address->sin_port = htons(remote_base_port);
+    address->sin6_port = htons(remote_base_port);
 
   auto socket = rtppeer::MIDI_PORT == port ? midi_socket : control_socket;
 
-  // DEBUG("Send to {}, {}, family {} {}. {} {}", port, socket, AF_INET, address->sin_family, inet_ntoa(address->sin_addr), htons(address->sin_port));
+  // DEBUG("Send to {}, {}, family {} {}. {} {}", port, socket, AF_INET6, address->sin6_family, inet_ntoa(address->sin6_addr), htons(address->sin6_port));
 
   auto res = ::sendto(
     socket, pb.start, pb.capacity(),
-    MSG_CONFIRM, (const struct sockaddr *)address, sizeof(struct sockaddr_in)
+    MSG_CONFIRM, (const struct sockaddr *)address, sizeof(struct sockaddr_in6)
   );
 
   if (res < 0 || static_cast<uint32_t>(res) != pb.capacity()){
@@ -199,17 +238,17 @@ void rtpserver::sendto(const parse_buffer_t &pb, rtppeer::port_e port, struct so
 }
 
 
-void rtpserver::create_peer_from(parse_buffer_t &buffer, struct sockaddr_in *cliaddr, rtppeer::port_e port){
+void rtpserver::create_peer_from(parse_buffer_t &buffer, struct sockaddr_in6 *cliaddr, rtppeer::port_e port){
   auto peer = std::make_shared<rtppeer>(name);
-  auto address = std::make_shared<struct sockaddr_in>();
-  ::memcpy(address.get(), cliaddr, sizeof(struct sockaddr_in));
-  auto remote_base_port = htons(cliaddr->sin_port);
-  // DEBUG("Address family {} {}. From {}", cliaddr.sin_family, address->sin_family, socket);
+  auto address = std::make_shared<struct sockaddr_in6>();
+  ::memcpy(address.get(), cliaddr, sizeof(struct sockaddr_in6));
+  auto remote_base_port = htons(cliaddr->sin6_port);
+  // DEBUG("Address family {} {}. From {}", cliaddr.sin6_family, address->sin6_family, socket);
 
   // This is the send to the proper ports
-  peer->sendto = [this, address, remote_base_port](const parse_buffer_t &buff, rtppeer::port_e port){
+  peer->send_event.connect([this, address, remote_base_port](const parse_buffer_t &buff, rtppeer::port_e port){
     this->sendto(buff, port, address.get(), remote_base_port);
-  };
+  });
 
   peer->data_ready(buffer, port);
 
@@ -218,20 +257,18 @@ void rtpserver::create_peer_from(parse_buffer_t &buffer, struct sockaddr_in *cli
 
   // Setup some callbacks
   auto wpeer = std::weak_ptr(peer);
-  peer->on_connect([this, wpeer](const std::string &name){
+  peer->connected_event.connect([this, wpeer](const std::string &name, rtppeer::status_e st){
+    if (st != rtppeer::CONNECTED)
+      return;
     if (wpeer.expired())
       return;
     auto peer = wpeer.lock();
-    for(auto &f: connected_events){
-      f(peer);
-    }
+    connected_event(peer);
   });
 
-  peer->on_midi([this](parse_buffer_t &data){
+  peer->midi_event.connect([this](parse_buffer_t &data){
     // DEBUG("Got MIDI from the remote peer into this server.");
-    for (auto &f: midi_event_events){
-      f(data);
-    }
+    midi_event(data);
   });
 }
 

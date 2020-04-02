@@ -28,6 +28,14 @@ example Behringer DeepMind12 Synthetizer has support over Wifi.
 
 On MacOS there is support included in the OS.
 
+### iPad
+
+To test I used `MIDI Network` and `MIDI Wrench`. The first to manage
+connections, the second to test.
+
+I was able to communicate exporting at rtpmidid side conneting my gadget to the
+`Network` port. Then use the `MIDI Network` on the iPad to make the connection.
+
 ### Windows
 
 * [rtpmidi](https://www.tobias-erichsen.de/software/rtpmidi.html) by Tobias
@@ -100,6 +108,7 @@ Development status / plan:
 * [ ] Periodic check all peers are still on, no new peers
 * [x] Remove ports when peer dissapears
 * [x] Client send CK every minute
+* [x] Can be controlled via Unix socket, but not required.
 * [ ] Jack MIDI support instead of ALSA seq
 * [ ] Use rtp midi timestamps
 * [ ] Journal support for note off
@@ -107,10 +116,34 @@ Development status / plan:
 * [ ] Journal support for Program Change
 * [ ] Journal support for Pitch Bend
 
+## CLI Control
+
+There is a basic CLI that used the [Unix socket control](#unix-socket-control).
+
+Use as:
+
+```shell
+cli/rtpmidid-cli.py help
+```
+
+## Unix socket control
+
+It is possible to change runtime parameters.
+
+To do it there is an optional control socket that could be use in the future by
+a GUI.
+
+By the moment, only direct connection works. Check [CONTROL.md](CONTROL.md) file
+for more information, but as a teaser, the following command creates a new ALSA
+port that connects to this IP and port:
+
+```shell
+echo "create DEEPMIND12 192.168.1.17 5004" | nc -U /var/run/rtpmidid/control.sock"
+```
 
 ## Compile
 
-Requires C++17 (Ubuntu 18.04+), and libfmt-dev, libasound2-dev.
+Requires C++17 (Ubuntu 18.04+), and libfmt-dev, libasound2-dev, libavahi-client-dev.
 
 To compile and run, execute:
 

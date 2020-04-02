@@ -16,27 +16,38 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 #pragma once
-#include <exception>
-#include <string>
-#include <vector>
-#include <fmt/format.h>
 
-namespace rtpmidid{
-  extern const char *VERSION;
+#include <functional>
+#include <map>
+#include "logger.hpp"
 
-  /**
-   * @short All rtpmidi options in a nice struct to pass around
-   *
-   * This allows easy read config and parse command line and generate the
-   * rtpmidid object.
-   */
-  struct config_t {
-    std::string name;
-    std::vector<std::string> connect_to;
-    // Create clients at this ports to start with. Later will see.
-    std::vector<std::string> ports;
-    std::string host;
-    std::string control;
-  };
-  config_t parse_cmd_args(int argc, char **argv);
-}
+template<typename... Args>
+class signal_t {
+public:
+  int connect(std::function<void(Args...)> const &&f) {
+    auto cid = max_id++;
+    slots[cid]=std::move(f);
+    return cid;
+  }
+
+  void disconnect(int id){
+    slots.erase(id);
+  }
+
+  void disconnect_all(){
+    slots.clear();
+  }
+
+  void operator()(Args... args){
+    for (auto const &f: slots){
+      f.second(std::forward<Args>(args)...);
+    }
+  }
+
+  size_t count(){
+    return slots.size();
+  }
+private:
+  uint32_t max_id = 0;
+  std::map<uint32_t, std::function<void(Args...)>> slots;
+};
